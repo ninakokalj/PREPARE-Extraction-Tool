@@ -124,6 +124,12 @@ class Record(SQLModel, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
+    # Relationship to SourceTermEx (one-to-many)
+    source_terms_ex: list["SourceTermEx"] = Relationship(
+        back_populates="record",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
     sentence_segments: list["SentenceSegment"] = Relationship(
         back_populates="record",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
@@ -210,6 +216,60 @@ class SourceTerm(SQLModel, table=True):
     # Relationship to the Cluster this term belongs to
     cluster: Optional["Cluster"] = Relationship(back_populates="source_terms")
 
+class SourceTermEx(SQLModel, table=True):
+    """
+    Source term model representing an extracted term from a record.
+    """
+
+    __tablename__ = "source_term_ex"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    value: str
+    label: str
+    start_position: Optional[int] = Field(default=None)
+    end_position: Optional[int] = Field(default=None)
+    score: Optional[float] = Field(default=None)
+
+    # Relationship back to Record (many-to-one)
+    record_id: int = Field(foreign_key="record.id", ondelete="CASCADE", nullable=False)
+    record: Optional["Record"] = Relationship(back_populates="source_terms_ex")
+
+    # Relationship back to Model (many-to-one)
+    model_id: int = Field(foreign_key="model.id", ondelete="CASCADE", nullable=False)
+    model: Optional["Model"] = Relationship(back_populates="source_terms")
+
+    # sentence_segment_id: Optional[int] = Field(
+    #     default=None,
+    #     foreign_key="sentence_segment.id",
+    #     nullable=True,
+    #     ondelete="SET NULL",
+    # )
+    # sentence_segment: Optional["SentenceSegment"] = Relationship(
+    #     back_populates="source_terms"
+    # )
+
+class Model(SQLModel, table=True):
+
+    __tablename__ = "model"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    version: str
+
+    # Relationship to SourceTermEx (one-to-many)
+    source_terms: list["SourceTermEx"] = Relationship(
+        back_populates="model",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+# class Evaluation(SQLModel, table=True):
+#     id: Optional[int] = Field(default=None, primary_key=True)
+#     label: str
+#     dataset_id: int
+#     model_id: int
+#     f1: float
+#     precision: float
+#     recall: float
 
 class Cluster(SQLModel, table=True):
     """

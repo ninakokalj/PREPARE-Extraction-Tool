@@ -9,7 +9,7 @@ from app.core.database import Dataset, User, engine, get_session
 from app.core.settings import settings
 from app.interfaces import Entity, LabelsInput, NERRequest
 from app.library.record_processing import link_dates_for_record
-from app.models_db import ExtractionJob, Record, SourceTerm
+from app.models_db import ExtractionJob, Record, SourceTerm, SourceTermEx, ExModel
 from app.routes.v1.auth import get_current_user
 from app.schemas import (
     ExtractionJobStartResponse,
@@ -83,6 +83,14 @@ def extract_entities_from_record(
     request_data = {"medical_text": record.text, "labels": labels.labels}
 
     try:
+        model_info_response = requests.get(
+            f"{settings.EXTRACT_HOST}/model/info", timeout=30
+        )
+        model_info_response.raise_for_status()
+        model_metadata = model_info_response.json()
+        model_db = get_or_create_model(model_metadata, db)
+        model_id = model_db.id
+
         response = requests.post(
             f"{settings.EXTRACT_HOST}/ner", json=request_data, timeout=300
         )
@@ -94,20 +102,23 @@ def extract_entities_from_record(
             detail="Extraction service unavailable",
         )
 
+    # TODO what kind of check do we want
     existing_keys = {
-        (t.value, t.label, t.start_position, t.end_position)
+        (t.value, t.label, t.start_position, t.end_position, t.model_id)
         for t in db.exec(
-            select(SourceTerm).where(SourceTerm.record_id == record_id)
+            select(SourceTermEx).where(SourceTermEx.record_id == record_id)
         ).all()
     }
 
     new_terms: List[SourceTerm] = []
+    ex_terms: List[SourceTermEx] = []
     for entity in entities:
         key = (
             entity["text"],
             entity["label"],
             entity["start"],
             entity["end"],
+            model_id
         )
         if key in existing_keys:
             continue
@@ -124,9 +135,20 @@ def extract_entities_from_record(
                 automatically_extracted=True,
             )
         )
+        ex_terms.append(
+            SourceTermEx(
+                record_id=record_id,
+                value=entity["text"],
+                label=entity["label"],
+                start_position=entity["start"],
+                end_position=entity["end"],
+                score=entity.get("score"),
+                model_id=model_id,
+            )
+        )
 
     if new_terms:
-        db.add_all(new_terms)
+        db.add_all(new_terms + ex_terms)
         db.flush()
         link_dates_for_record(db, record, dataset)
         db.commit()
@@ -194,11 +216,27 @@ def extract_entities_from_records(
             status=job.status,
         )
 
+    try:
+        model_info_response = requests.get(
+            f"{settings.EXTRACT_HOST}/model/info", timeout=30
+        )
+        model_info_response.raise_for_status()
+        model_metadata = model_info_response.json()
+        model_db = get_or_create_model(model_metadata, db)
+        model_id = model_db.id
+        
+    except requests.RequestException:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Extraction service unavailable",
+        )
+    
     background_tasks.add_task(
         run_dataset_extraction_job,
         job_id=job.id,
         dataset_id=dataset_id,
         labels=labels.labels,
+        model_id=model_id
     )
 
     return ExtractionJobStartResponse(
@@ -292,7 +330,7 @@ def cancel_extraction_job(
     return MessageOutput(message="Cancellation requested")
 
 
-def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str]):
+def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str], model_id: int):
     """Background task that extracts entities for each unreviewed record."""
 
     with Session(engine) as session:
@@ -360,20 +398,23 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str]):
                 session.commit()
                 return
 
+            # TODO what kind of check do we want
             existing_keys = {
-                (t.value, t.label, t.start_position, t.end_position)
+                (t.value, t.label, t.start_position, t.end_position, t.model_id)
                 for t in session.exec(
-                    select(SourceTerm).where(SourceTerm.record_id == record.id)
+                    select(SourceTermEx).where(SourceTermEx.record_id == record.id)
                 ).all()
             }
-
+            
             new_terms: List[SourceTerm] = []
+            ex_terms: List[SourceTermEx] = []
             for entity in entities:
                 key = (
                     entity["text"],
                     entity["label"],
                     entity["start"],
                     entity["end"],
+                    model_id
                 )
                 if key in existing_keys:
                     continue
@@ -390,9 +431,20 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str]):
                         automatically_extracted=True,
                     )
                 )
+                ex_terms.append(
+                    SourceTermEx(
+                        record_id=record.id,
+                        value=entity["text"],
+                        label=entity["label"],
+                        start_position=entity["start"],
+                        end_position=entity["end"],
+                        score=entity.get("score"),
+                        model_id=model_id
+                    )
+                )
 
             if new_terms:
-                session.add_all(new_terms)
+                session.add_all(new_terms + ex_terms)
                 session.flush()
                 link_dates_for_record(session, record, dataset)
 
@@ -405,3 +457,28 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str]):
         job.updated_at = datetime.now(timezone.utc)
         session.add(job)
         session.commit()
+
+
+# ================================================
+# NER model routes
+# ================================================
+
+def get_or_create_model(metadata: dict, db: Session):
+    statement = select(ExModel).where(
+        ExModel.name == metadata["name"],
+        ExModel.version == metadata["version"]
+    )
+    existing = db.exec(statement).first()
+    if existing:
+        return existing
+    
+    new_model = ExModel(
+        name=metadata["name"],
+        version=metadata["version"]
+    )
+
+    db.add(new_model)
+    db.commit()
+    db.refresh(new_model)
+
+    return new_model
