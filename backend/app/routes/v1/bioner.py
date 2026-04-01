@@ -9,7 +9,7 @@ from app.core.database import Dataset, User, engine, get_session
 from app.core.settings import settings
 from app.interfaces import Entity, LabelsInput, NERRequest
 from app.library.record_processing import link_dates_for_record
-from app.models_db import ExtractionJob, Record, SourceTerm, SourceTermEx, ExModel
+from app.models_db import ExtractionJob, Record, SourceTerm, SourceTermEx, Model
 from app.routes.v1.auth import get_current_user
 from app.schemas import (
     ExtractionJobStartResponse,
@@ -464,15 +464,15 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str], 
 # ================================================
 
 def get_or_create_model(metadata: dict, db: Session):
-    statement = select(ExModel).where(
-        ExModel.name == metadata["name"],
-        ExModel.version == metadata["version"]
+    statement = select(Model).where(
+        Model.name == metadata["name"],
+        Model.version == metadata["version"]
     )
     existing = db.exec(statement).first()
     if existing:
         return existing
     
-    new_model = ExModel(
+    new_model = Model(
         name=metadata["name"],
         version=metadata["version"]
     )
