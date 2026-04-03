@@ -21,13 +21,16 @@ def read_model_metadata(model_dir: str) -> dict:
         metadata_path = Path(model_dir) / "metadata.json"
 
         if not metadata_path.exists():
-            raise FileNotFoundError(f"metadata.json not found in {model_dir}")
-        
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
+            metadata = {
+                "name": "Extraction model",
+                "version": "1.0"
+            }
+        else:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
 
-        if 'name' not in metadata or 'version' not in metadata:
-            raise ValueError("metadata.json must contain at least 'name' and 'version'")
+            if 'name' not in metadata or 'version' not in metadata:
+                raise ValueError("metadata.json must contain at least 'name' and 'version'")
         
         return metadata
 

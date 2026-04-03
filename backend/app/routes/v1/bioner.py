@@ -87,7 +87,7 @@ def extract_entities_from_record(
             f"{settings.EXTRACT_HOST}/model/info", timeout=30
         )
         model_info_response.raise_for_status()
-        model_metadata = model_info_response.json()
+        model_metadata = model_info_response.json()["model"]
         model_db = get_or_create_model(model_metadata, db)
         model_id = model_db.id
 
@@ -221,7 +221,7 @@ def extract_entities_from_records(
             f"{settings.EXTRACT_HOST}/model/info", timeout=30
         )
         model_info_response.raise_for_status()
-        model_metadata = model_info_response.json()
+        model_metadata = model_info_response.json()["model"]
         model_db = get_or_create_model(model_metadata, db)
         model_id = model_db.id
         

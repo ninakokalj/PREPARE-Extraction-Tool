@@ -95,6 +95,11 @@ class Dataset(SQLModel, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
+    evaluations: list["Evaluation"] = Relationship(
+        back_populates="dataset",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
 
 class Record(SQLModel, table=True):
     """
@@ -262,14 +267,33 @@ class Model(SQLModel, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
-# class Evaluation(SQLModel, table=True):
-#     id: Optional[int] = Field(default=None, primary_key=True)
-#     label: str
-#     dataset_id: int
-#     model_id: int
-#     f1: float
-#     precision: float
-#     recall: float
+    # Relationship to Evaluation (one-to-many)
+    evaluations: list["Evaluation"] = Relationship(
+        back_populates="model",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+class Evaluation(SQLModel, table=True):
+
+    __tablename__ = "evaluation"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    label: str
+    f1: float
+    precision: float
+    recall: float
+
+    # Relationship to Dataset (one-to-many)
+    dataset_id: int = Field(
+        foreign_key="dataset.id", ondelete="CASCADE", nullable=False
+    )
+    dataset: Optional["Dataset"] = Relationship(back_populates="evaluations")
+
+    # Relationship to Model (one-to-many)
+    model_id: int = Field(
+        foreign_key="model.id", ondelete="CASCADE", nullable=False
+    )
+    model: Optional["Model"] = Relationship(back_populates="evaluations")
 
 class Cluster(SQLModel, table=True):
     """
