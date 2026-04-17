@@ -140,6 +140,11 @@ class Record(SQLModel, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
+    trained_models: list["Model"] = Relationship(
+        back_populates="train_records",
+        link_model=ModelTrainRecordLink,
+    )
+
 
 class SentenceSegment(SQLModel, table=True):
     """Normalized spans representing sentences or line segments within a record."""
@@ -262,9 +267,17 @@ class Model(SQLModel, table=True):
     version: str
 
     # Relationship to SourceTermEx (one-to-many)
+    # SourceTermEx extracted with this model
     source_terms: list["SourceTermEx"] = Relationship(
         back_populates="model",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+    # Relationship to Records (many-to-many)
+    # Records used to train this model
+    train_records: list["Record"] = Relationship(
+        back_populates="trained_models",
+        link_model=ModelTrainRecordLink,
     )
 
     # Relationship to Evaluation (one-to-many)
@@ -273,15 +286,23 @@ class Model(SQLModel, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
+class ModelTrainRecordLink(SQLModel, table=True):
+    model_id: Optional[int] = Field(
+        default=None, foreign_key="model.id", primary_key=True
+    )
+    record_id: Optional[int] = Field(
+        default=None, foreign_key="record.id", primary_key=True
+    )
+
 class Evaluation(SQLModel, table=True):
 
     __tablename__ = "evaluation"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     label: str
-    f1: float
-    precision: float
-    recall: float
+    score: Dict[str, Any] = Field(
+        sa_column=Column(JSON, nullable=False)
+    )
 
     # Relationship to Dataset (one-to-many)
     dataset_id: int = Field(
@@ -366,7 +387,9 @@ class ExtractionJob(SQLModel, table=True):
     dataset_id: int = Field(
         foreign_key="dataset.id", ondelete="CASCADE", nullable=False, index=True
     )
-
+    model_id: int = Field(
+        foreign_key="model.id", nullable=False, index=True
+    )
     total: int = Field(default=0)
     completed: int = Field(default=0)
     status: str = Field(

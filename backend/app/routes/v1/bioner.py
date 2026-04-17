@@ -41,7 +41,6 @@ def extract_entities(
             detail="Extract service unavailable",
         )
 
-
 @router.post("/{dataset_id}/records/{record_id}/extract", response_model=MessageOutput)
 def extract_entities_from_record(
     dataset_id: int,
@@ -80,6 +79,28 @@ def extract_entities_from_record(
             message=f"Record {record_id} is reviewed; extraction skipped"
         )
 
+    already_processed = db.exec(
+        select(SourceTermEx.id)
+        .where(SourceTermEx.record_id == record_id)
+        .where(SourceTermEx.model_id == model_id)
+    ).first()
+
+    if already_processed:
+        return MessageOutput(
+            message=f"Record {record_id} was already extracted with this model; extraction skipped"
+        )
+
+    # Delete only automatically extracted SourceTerms for this record
+    auto_terms = db.exec(
+        select(SourceTerm)
+        .where(SourceTerm.record_id == record_id)
+        .where(SourceTerm.automatically_extracted == True)
+    ).all()
+
+    for term in auto_terms:
+        db.delete(term)
+    db.flush()
+
     request_data = {"medical_text": record.text, "labels": labels.labels}
 
     try:
@@ -102,39 +123,29 @@ def extract_entities_from_record(
             detail="Extraction service unavailable",
         )
 
-    # TODO what kind of check do we want
+    # Keep manually created/edited SourceTerms and avoid duplicating them
     existing_keys = {
-        (t.value, t.label, t.start_position, t.end_position, t.model_id)
+        (t.value, t.label, t.start_position, t.end_position)
         for t in db.exec(
-            select(SourceTermEx).where(SourceTermEx.record_id == record_id)
+            select(SourceTerm).where(SourceTerm.record_id == record_id)
         ).all()
     }
 
+    seen_in_response = set()
     new_terms: List[SourceTerm] = []
     ex_terms: List[SourceTermEx] = []
+
     for entity in entities:
         key = (
             entity["text"],
             entity["label"],
             entity["start"],
-            entity["end"],
-            model_id
+            entity["end"]
         )
-        if key in existing_keys:
-            continue
 
-        existing_keys.add(key)
-        new_terms.append(
-            SourceTerm(
-                record_id=record_id,
-                value=entity["text"],
-                label=entity["label"],
-                start_position=entity["start"],
-                end_position=entity["end"],
-                score=entity.get("score"),
-                automatically_extracted=True,
-            )
-        )
+        if key in seen_in_response:
+            continue
+        seen_in_response.add(key)
         ex_terms.append(
             SourceTermEx(
                 record_id=record_id,
@@ -147,11 +158,31 @@ def extract_entities_from_record(
             )
         )
 
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        new_terms.append(
+            SourceTerm(
+                record_id=record_id,
+                value=entity["text"],
+                label=entity["label"],
+                start_position=entity["start"],
+                end_position=entity["end"],
+                score=entity.get("score"),
+                automatically_extracted=True,
+            )
+        )
+
     if new_terms:
-        db.add_all(new_terms + ex_terms)
+        db.add_all(new_terms)
         db.flush()
         link_dates_for_record(db, record, dataset)
-        db.commit()
+
+    if ex_terms:
+        db.add_all(ex_terms)
+        db.flush()
+
+    db.commit()
 
     return MessageOutput(
         message=f"Extracted and saved {len(new_terms)} entities from record {record_id}"
@@ -190,31 +221,8 @@ def extract_entities_from_records(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No records found for this dataset",
         )
-
+    # TODO
     records_to_process = [r for r in records if not r.reviewed]
-    total = len(records_to_process)
-
-    job = ExtractionJob(
-        dataset_id=dataset_id,
-        total=total,
-        completed=0,
-        status="pending",
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    if total == 0:
-        job.status = "completed"
-        job.updated_at = datetime.now(timezone.utc)
-        db.add(job)
-        db.commit()
-        return ExtractionJobStartResponse(
-            job_id=job.id,
-            dataset_id=dataset_id,
-            total=total,
-            status=job.status,
-        )
 
     try:
         model_info_response = requests.get(
@@ -231,12 +239,64 @@ def extract_entities_from_records(
             detail="Extraction service unavailable",
         )
     
+    # check if a job for this dataset and model already exists
+    existing_job = db.exec(
+        select(ExtractionJob)
+        .where(
+            ExtractionJob.dataset_id == dataset_id,
+            ExtractionJob.model_id == model_id,
+        )
+        .order_by(ExtractionJob.created_at.desc())
+    ).first()
+
+    if existing_job is None:
+        # First extraction for this model on this dataset:
+        # delete automatically extracted SourceTerms for unreviewed records only
+        unreviewed_record_ids = [r.id for r in records_to_process]
+
+        if unreviewed_record_ids:
+            source_terms_to_delete = db.exec(
+                select(SourceTerm)
+                .where(SourceTerm.record_id.in_(unreviewed_record_ids))
+                .where(SourceTerm.automatically_extracted == True)
+            ).all()
+            for st in source_terms_to_delete:
+                db.delete(st)
+
+            db.commit()
+
+    total = len(records_to_process)
+    job = ExtractionJob(
+        dataset_id=dataset_id,
+        model_id=model_id,
+        total=total,
+        completed=0,
+        status="pending",
+    )
+
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    if total == 0:
+        job.status = "completed"
+        job.updated_at = datetime.now(timezone.utc)
+        db.add(job)
+        db.commit()
+
+        return ExtractionJobStartResponse(
+            job_id=job.id,
+            dataset_id=dataset_id,
+            total=job.total,
+            status=job.status,
+        )
+
     background_tasks.add_task(
         run_dataset_extraction_job,
         job_id=job.id,
         dataset_id=dataset_id,
         labels=labels.labels,
-        model_id=model_id
+        model_id=model_id,
     )
 
     return ExtractionJobStartResponse(
@@ -352,19 +412,20 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str], 
             select(Record).where(Record.dataset_id == dataset_id)
         ).all()
 
-        # Skip reviewed records and records already containing automatically extracted terms
+        # Skip reviewed records and records already containing extracted terms with current model
         unreviewed_records = [r for r in records if not r.reviewed]
         processed_records = []
         records_to_process: List[Record] = []
 
         for record in unreviewed_records:
-            has_auto = session.exec(
-                select(SourceTerm.id)
-                .where(SourceTerm.record_id == record.id)
-                .where(SourceTerm.automatically_extracted == True)  # noqa: E712
+            # if the model already processed this Record, skip it
+            has_extraction_for_model = session.exec(
+                select(SourceTermEx.id)
+                .where(SourceTermEx.record_id == record.id)
+                .where(SourceTermEx.model_id == model_id)
             ).first()
 
-            if has_auto:
+            if has_extraction_for_model:
                 processed_records.append(record)
             else:
                 records_to_process.append(record)
@@ -398,14 +459,15 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str], 
                 session.commit()
                 return
 
-            # TODO what kind of check do we want
             existing_keys = {
-                (t.value, t.label, t.start_position, t.end_position, t.model_id)
+                (t.value, t.label, t.start_position, t.end_position)
                 for t in session.exec(
-                    select(SourceTermEx).where(SourceTermEx.record_id == record.id)
+                    select(SourceTerm).where(SourceTerm.record_id == record.id)
                 ).all()
             }
             
+            seen_in_response = set()
+
             new_terms: List[SourceTerm] = []
             ex_terms: List[SourceTermEx] = []
             for entity in entities:
@@ -413,24 +475,12 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str], 
                     entity["text"],
                     entity["label"],
                     entity["start"],
-                    entity["end"],
-                    model_id
+                    entity["end"]
                 )
-                if key in existing_keys:
-                    continue
 
-                existing_keys.add(key)
-                new_terms.append(
-                    SourceTerm(
-                        record_id=record.id,
-                        value=entity["text"],
-                        label=entity["label"],
-                        start_position=entity["start"],
-                        end_position=entity["end"],
-                        score=entity.get("score"),
-                        automatically_extracted=True,
-                    )
-                )
+                if key in seen_in_response:
+                    continue
+                seen_in_response.add(key)
                 ex_terms.append(
                     SourceTermEx(
                         record_id=record.id,
@@ -443,10 +493,28 @@ def run_dataset_extraction_job(job_id: int, dataset_id: int, labels: List[str], 
                     )
                 )
 
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                new_terms.append(
+                    SourceTerm(
+                        record_id=record.id,
+                        value=entity["text"],
+                        label=entity["label"],
+                        start_position=entity["start"],
+                        end_position=entity["end"],
+                        score=entity.get("score"),
+                        automatically_extracted=True,
+                    )
+                )
+                
             if new_terms:
-                session.add_all(new_terms + ex_terms)
+                session.add_all(new_terms)
                 session.flush()
                 link_dates_for_record(session, record, dataset)
+            if ex_terms:
+                session.add_all(ex_terms)
+                session.flush()
 
             job.completed += 1
             job.updated_at = datetime.now(timezone.utc)
@@ -482,3 +550,45 @@ def get_or_create_model(metadata: dict, db: Session):
     db.refresh(new_model)
 
     return new_model
+
+# ================================================
+# NER monitoring helper functions
+# ================================================
+
+def get_records_to_train(dataset_id: int):
+    with Session(engine) as db:
+        statement = (
+            select(Record)
+            .where(Record.dataset_id == dataset_id, Record.reviewed)
+        )
+        return db.exec(statement).all()
+
+def evaluate(model_id: int, dataset_id: int):
+    with Session(engine) as db:
+        model = db.get(Model, model_id)
+        if model is None:
+            return
+
+        # records that were used for training
+        train_ids = {r.id for r in model.train_records}
+
+        # reviewed records
+        reviewed_records = db.exec(
+            select(Record).where(
+                Record.dataset_id == dataset_id,
+                Record.reviewed,
+            )
+        ).all()
+
+        records_to_evaluate = [
+            r for r in reviewed_records if r.id not in train_ids
+        ]
+
+        for record in records_to_evaluate:
+            gold_terms = record.source_terms
+            predicted_terms = [
+                ex for ex in record.source_terms_ex
+                if ex.model_id == model_id
+            ]
+
+            # compare here
