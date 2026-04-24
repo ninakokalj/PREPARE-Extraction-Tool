@@ -248,16 +248,6 @@ class SourceTermEx(SQLModel, table=True):
     model_id: int = Field(foreign_key="model.id", ondelete="CASCADE", nullable=False)
     model: Optional["Model"] = Relationship(back_populates="source_terms")
 
-    # sentence_segment_id: Optional[int] = Field(
-    #     default=None,
-    #     foreign_key="sentence_segment.id",
-    #     nullable=True,
-    #     ondelete="SET NULL",
-    # )
-    # sentence_segment: Optional["SentenceSegment"] = Relationship(
-    #     back_populates="source_terms"
-    # )
-
 class Model(SQLModel, table=True):
 
     __tablename__ = "model"
@@ -400,6 +390,7 @@ class ExtractionJob(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    currently_used: bool = Field(default=True) # samo en True
 
 class Vocabulary(SQLModel, table=True):
     """

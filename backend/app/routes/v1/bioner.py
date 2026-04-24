@@ -79,15 +79,74 @@ def extract_entities_from_record(
             message=f"Record {record_id} is reviewed; extraction skipped"
         )
 
-    already_processed = db.exec(
-        select(SourceTermEx.id)
+    already_extracted_terms = db.exec(
+        select(SourceTermEx)
         .where(SourceTermEx.record_id == record_id)
         .where(SourceTermEx.model_id == model_id)
-    ).first()
+    ).all()
 
-    if already_processed:
+    if already_extracted_terms:
+        current_auto_terms = db.exec(
+            select(SourceTerm)
+            .where(SourceTerm.record_id == record_id)
+            .where(SourceTerm.automatically_extracted == True)  # noqa: E712
+        ).all()
+
+        st_keys = {
+            (t.value, t.label, t.start_position, t.end_position)
+            for t in current_auto_terms
+        }
+
+        stex_keys = {
+            (t.value, t.label, t.start_position, t.end_position)
+            for t in already_extracted_terms
+        }
+
+        if st_keys != stex_keys:
+            for term in current_auto_terms:
+                db.delete(term)
+            db.flush()
+
+            existing_source_term_keys = {
+                (t.value, t.label, t.start_position, t.end_position)
+                for t in db.exec(
+                    select(SourceTerm).where(SourceTerm.record_id == record_id)
+                ).all()
+            }
+
+            new_terms = []
+            for ex in already_extracted_terms:
+                key = (ex.value, ex.label, ex.start_position, ex.end_position)
+
+                if key in existing_source_term_keys:
+                    continue
+
+                existing_source_term_keys.add(key)
+                new_terms.append(
+                    SourceTerm(
+                        record_id=record_id,
+                        value=ex.value,
+                        label=ex.label,
+                        start_position=ex.start_position,
+                        end_position=ex.end_position,
+                        score=ex.score,
+                        automatically_extracted=True,
+                    )
+                )
+
+            if new_terms:
+                db.add_all(new_terms)
+                db.flush()
+                link_dates_for_record(db, record, dataset)
+
+            db.commit()
+
+            return MessageOutput(
+                message=f"Record {record_id} was already extracted with this model; SourceTerms were restored from SourceTermEx."
+            )
+
         return MessageOutput(
-            message=f"Record {record_id} was already extracted with this model; extraction skipped"
+            message=f"Record {record_id} was already extracted with this model; extraction skipped."
         )
 
     # Delete only automatically extracted SourceTerms for this record
@@ -239,12 +298,13 @@ def extract_entities_from_records(
             detail="Extraction service unavailable",
         )
     
-    # check if a job for this dataset and model already exists
+    # check if a job for this dataset and model already exists and is currently "used"
     existing_job = db.exec(
         select(ExtractionJob)
         .where(
             ExtractionJob.dataset_id == dataset_id,
             ExtractionJob.model_id == model_id,
+            ExtractionJob.currently_used == True
         )
         .order_by(ExtractionJob.created_at.desc())
     ).first()
@@ -265,6 +325,15 @@ def extract_entities_from_records(
 
             db.commit()
 
+    # set current job to False, to set new job to True
+    currently_used_job = db.exec(
+        select(ExtractionJob)
+        .where(ExtractionJob.currently_used == True)
+    ).first()
+    currently_used_job.currently_used = False
+    db.add(currently_used_job)
+    db.commit()
+
     total = len(records_to_process)
     job = ExtractionJob(
         dataset_id=dataset_id,
@@ -272,6 +341,7 @@ def extract_entities_from_records(
         total=total,
         completed=0,
         status="pending",
+        currently_used=True
     )
 
     db.add(job)
